@@ -11,6 +11,7 @@ use Psalm\Context;
 use Psalm\Internal\Analyzer\Statements\Expression\BinaryOp\ArithmeticOpAnalyzer;
 use Psalm\Internal\Analyzer\Statements\ExpressionAnalyzer;
 use Psalm\Internal\Analyzer\StatementsAnalyzer;
+use Psalm\Internal\Provider\NodeDataProvider;
 use Psalm\Node\Expr\BinaryOp\VirtualMinus;
 use Psalm\Node\Expr\BinaryOp\VirtualPlus;
 use Psalm\Node\Expr\VirtualAssign;
@@ -41,6 +42,7 @@ class IncDecExpressionAnalyzer
 
         $context->inside_assignment = $was_inside_assignment;
 
+        self::replaceTIntRangeWithoutMaxBoundToTInt($statements_analyzer->node_data, $stmt->var);
         $stmt_var_type = $statements_analyzer->node_data->getType($stmt->var);
 
         if ($stmt instanceof PostInc || $stmt instanceof PostDec) {
@@ -137,5 +139,38 @@ class IncDecExpressionAnalyzer
         }
 
         return true;
+    }
+
+    /**
+     * Problem:
+     * Sometimes the StatementsAnalyzer delivers pure TInt types (when the increment calls count < 2 = for 0 and 1),
+     * but it delivers also TIntRanges when there are more increment count.
+     * The purpose of the fix is to streamline this behavior.
+     * See tests in Internal\Analyzer\Expression\Fetch\ArrayFetchAnalyzerTest
+     *
+     * Fixes:
+     * #10038: [InvalidArrayOffset] Cannot access value on variable / incrementing operator in foreach loop
+     */
+    private static function replaceTIntRangeWithoutMaxBoundToTInt(
+        NodeDataProvider $provider,
+        PhpParser\Node\Expr $node,
+    ): void {
+
+        $stmt_var_type = $provider->getType($node);
+        if (!$stmt_var_type) {
+            return;
+        }
+
+        $types = $stmt_var_type->getAtomicTypes();
+        foreach ($types as $key => $type) {
+            if ($type instanceof Type\Atomic\TIntRange
+                && $type->max_bound === null
+            ) {
+                $tInt = new Type\Atomic\TLiteralInt($type->min_bound);
+                unset($types[$key]);
+                $types[$tInt->getKey()] = $tInt;
+            }
+        }
+        $provider->setType($node, new Type\Union($types));
     }
 }
